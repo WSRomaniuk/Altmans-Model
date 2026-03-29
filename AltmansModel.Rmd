@@ -1,0 +1,173 @@
+---
+title: "Model Altmana"
+author: "Wiktor Suchoński-Romaniuk"
+output:
+  html_document:
+    math_method:
+      engine: katex
+    theme: bootstrap
+    df_print: paged
+    css: style.css
+    
+---
+
+<style>
+p {
+  text-align: justify;
+}
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+knitr::opts_chunk$set(fig.align = "center")
+knitr::opts_chunk$set(dpi = 200)
+```
+
+```{r echo=FALSE}
+library(foreign)
+library(dplyr)
+```
+
+### Wprowadzenie teoretyczne
+
+Ryzyko kredytowe to ryzyko wynikające z możliwości złamania umowy kredytowej. Można wyróżnić ryzyko niedotrzymania warunków (default risk) oraz ryzyko wiarygodności kredytowej (creditworthiness risk). Default risk to prawdpodobieństwo, że kredytobiorca nie spłaci zobowiązania. Creditworthiness risk natomiast jest szacowany na podstawie dokumentów, historii klienta i jest on coraz ważniejszy w kwestii credit scoringu.
+
+Analiza dyskryminacyjna to narzędzie ilościowe, które jest wykorzystywane w budowaniu modeli prognozowania upadłości firm. Metoda ta szuka najlepszego podziału obiektów na kilka rozłącznych grup. W ryzyku kredytowym wykorzystuje się ją, ponieważ można na podstawie wskaźników finansowych przypisać firmę do grupy klientów np. bezpiecznych kredytobiorców. 
+
+Model Altmana to jeden z najbardziej znanych modeli do prognozowania upadłości firm i jest on zastosowaniem modelu analizy dyskryminacyjnej. Ma postać równania liniowego i łączy 5 wskaźników finansowych w jeden ostateczny wynik (Z-Score). Ograniczeniem modelu jest jego prostota, fakt, że bazuje on na ograniczonej liczbie informacji oraz, że jest liniowy. Nie jest to idealne odzwierciedlenie drogi do bankructwa.
+
+### Wprowadzenie do badania
+
+Na podstawie danych zawierających wskaźniki finansowe polskich przedsiębiorstw z [Bazy danych polskich firm z UCI](http://archive.ics.uci.edu/dataset/365/polish+companies+bankruptcy+data), zostanie przeprowadzona predykcja upadłości przedsiębiorstw na podstawie oryginalnego modelu Altmana. Pobrano dane zawierające informacje o statusie upadłości przedsiębiorstw na rok przed bankructwem.
+
+```{r include=FALSE}
+dane <- read.arff("5year.arff")
+
+dane <- dane %>%
+  filter(!is.na(Attr3),
+         !is.na(Attr6),
+         !is.na(Attr7),
+         !is.na(Attr8),
+         !is.na(Attr9),
+         !is.na(Attr29))
+```
+
+### Wybór firm
+
+Wybrano 100 firm, które zbankrutowały w sposób losowy. Firmy, które przetrwały zostały wylosowane warstwowo - aby odpowiadały wielkością aktywów bankrutom - tak jak zrobił to Altman.
+
+Aby to osiągnąć obliczono dla bankrutów średnią z logarytmu aktywów oraz stworzono przedział ufności jako średnia +/- dwa odchylenia standardowe. Następnie wylosowano 100 firm zdrowych z tego przedziału.
+
+```{r}
+set.seed(123) 
+
+bankruci <- dane %>% filter(class == "1")
+
+bankruci_100 <- bankruci %>% sample_n(100)
+
+
+srednia_aktywa <- mean(bankruci_100$Attr29, na.rm = TRUE)
+odchylenie_aktywa <- sd(bankruci_100$Attr29, na.rm = TRUE)
+
+
+dolna_granica <- srednia_aktywa - (2 * odchylenie_aktywa)
+gorna_granica <- srednia_aktywa + (2 * odchylenie_aktywa)
+
+
+zdrowe <- dane %>% 
+  filter(class == "0") %>% 
+  filter(Attr29 >= dolna_granica & Attr29 <= gorna_granica)
+
+zdrowe_100 <- zdrowe %>% sample_n(100)
+
+
+dane_model <- bind_rows(bankruci_100, zdrowe_100)
+
+```
+
+### Wybór wskaźników finansowych
+
+
+W następnym kroku zostały wybrane wskaźniki finansowe odpowiadające tym, które wykorzystał Altman. Oto one:
+
+- x3 - working capital / total assets - kapitał obrotowy netto / aktywa
+
+- x6 - retained earnings / total assets - zysk zatrzymany / aktywa
+
+- x7 - ebit / total assets - zysk przed opodatkowaniem i odsetkami / aktywa
+
+- x9 - sales / total assets - przychody ze sprzedaży / aktywa
+
+Ostatnim wskaźnkiem powinien być: Market value of equity / book value of total debt - rynkowa wartość kapitału własnego / księgowa wartość zobowiązań
+
+Z powodu braku tego wskaźnika został wytypowany na jego miejsce wskaźnik:
+
+- x8 - book value of equity / total liabilities - wartość księgowa kapitału własnego / wartość zobowiązań
+
+Altman wykorzystywał firmy, które są notowane na giełdzie. Rynkowa wartość kapitału to liczba akcji pomnożona przez ich cenę na giełdzie. Badane przez nas firmy polskie nie są w większości notowane, stąd potrzeba zmiany. 
+
+
+```{r}
+dane_model <- dane_model %>%
+  select(X1 = Attr3, 
+         X2 = Attr6, 
+         X3 = Attr7, 
+         X4 = Attr8, 
+         X5 = Attr9, 
+         class)
+
+```
+
+
+### Modele Altmana - Z-Score
+
+
+W kolejnym kroku obliczono dla każdej firmy Z-Score na podstawie modelu Altmana i wyliczonych przez niego wag.
+
+```{r}
+dane_model <- dane_model %>%
+  mutate(Z_score = 1.2 * X1 + 1.4 * X2 + 3.3 * X3 + 0.6 * X4 + 0.99 * X5)
+```
+
+
+### Predykcja
+
+
+Zastosowano dwie metody do utworzenia grup predykcji. \n
+
+W pierwszej wykorzystano podział na 3 grupy - bankrutów, szarą strefę oraz zdrowe firmy. Jeżeli Z-Score dla danej firmy był mniejszy od 1.81, firma zostawała zakwalifikowana jako bankrut, jeśli Z_Score był większy od 2.99 to do grupy firm, które przetrwały. Wynik pomiędzy kwalifikował firmę do szarej strefy. Następnie zostawione zostają tylko te firmy, które nie należą do szarej strefy oraz liczony jest procent zgodności. 
+
+
+```{r}
+dane_model$Pred1 <- ifelse(dane_model$Z_score < 1.81, "1", 
+                           ifelse(dane_model$Z_score > 2.99, "0", "szara"))
+
+zdecydowane <- dane_model[!is.na(dane_model$Pred1) & dane_model$Pred1 != "szara", ]
+
+zgodnosc_wersja1 <- mean(zdecydowane$Pred1 == zdecydowane$class) * 100
+```
+
+Druga wersja nie tworzy szarej strefy, firmy są kwalifikowane jedynie na podstawie punktu odcięcia 2.675. 
+
+```{r}
+dane_model$Pred2<- ifelse(dane_model$Z_score < 2.675, "1", "0")
+
+wszystkie_pelne <- dane_model[!is.na(dane_model$Pred2), ]
+
+zgodnosc_wersja2 <- mean(wszystkie_pelne$Pred2 == wszystkie_pelne$class) * 100
+```
+
+
+```{r echo=FALSE}
+cat("Zgodność Wersja 1:", round(zgodnosc_wersja1, 2), "%\n")
+cat("Zgodność Wersja 2:", round(zgodnosc_wersja2, 2), "%\n")
+
+```
+
+### Podsumowanie
+
+Jakość predykcji oryginalnego modelu Altmana dla badanej próby należy ocenić jako przeciętną. Przy wykorzystaniu punktu odcięcia 2.675, skuteczność wyniosła 70.5%. Oznacza to, że model myli się średnio w przypadku niemal co trzeciej firmy. Przy odrzuceniu szarej strefy skuteczność wzrosła do 77.92% co jest logiczną prawidłowością, gdyż są brane tylko pod uwagę skrajne przypadki. Obie wartości odbiegają od skuteczności 95%, którą uzyskał Altman w swoim badaniu.
+
+
+Oryginalny model Altmana nie jest skutecznym narzędziem do predykcji upadłości firm w przypadku rozważanych danych. Po pierwsze może to wynikać z budowy modelu, gdzie został zmieniony wskaźnik X4. Zamieniona została naturalnie wyższa wartość rynkowa na mniejszą - księgową, co mogło obniżyć wyniki Z-Score. Po drugie, oryginalne badanie Altmana przeprowadzane było w latach 60. na podstawie ówczesnych amerykańskich firm. To zupełnie inne realia rynkowe i gospodarcze, porównując to z polskimi przedsiębiorstwami z naszej bazy danych z początku lat 2000. Wagi obliczone 50 lat wcześniej przez Altmana mogą nie być już tak dokładne. 
